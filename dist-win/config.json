@@ -1,0 +1,79 @@
+{
+  "room_id": 1879007211,
+  "cookie": "",
+  "listen_addr": ":8080",
+  "rules": {
+    "bugs_per_gift": 1,
+    "captain_lamp_gifts": [
+      "粉丝团灯牌",
+      "粉丝灯牌"
+    ],
+    "ship_duration_sec": 60,
+    "ship_ult_hits": 5,
+    "admiral_revive_sec": 300,
+    "captain_revive_sec": 600,
+    "summon_bug_gifts": [
+      "小花花",
+      "辣条",
+      "人气票",
+      "点赞",
+      "牛哇牛哇",
+      "打call"
+    ],
+    "single_kill_gifts": [
+      "情书",
+      "小星星",
+      "干杯",
+      "吃瓜"
+    ],
+    "blind_box_gifts": [
+      "心动盲盒"
+    ],
+    "blind_box_cards": [
+      "\"当然啦\"卡(10个句)",
+      "尾句喵卡(1分钟)",
+      "指定动态卡(1条)",
+      "复读机(弹幕最后1条读1分钟)",
+      "道歉卡(可指定)",
+      "分手挽留卡(可指定)",
+      "亲亲卡(可指定)",
+      "撒娇八连卡(可指定)",
+      "土味情话卡(可指定)",
+      "天下第一卡(可指定)",
+      "降智卡",
+      "强制爱卡",
+      "汪汪卡(指定一首歌)",
+      "万能指定卡(其他任何1个)",
+      "示爱卡(可指定)",
+      "戏精卡",
+      "点歌卡",
+      "上舰卡",
+      "舰礼卡",
+      "真心话",
+      "夸夸卡",
+      "魅惑八连卡",
+      "乞讨卡",
+      "简笔画卡",
+      "奶茶卡",
+      "违禁词卡",
+      "含水唱儿歌卡",
+      "绕口令(夹子音)",
+      "认错八连",
+      "撒娇八连",
+      "霸气八连",
+      "鬼故事",
+      "读诗/文（可指定）"
+    ],
+    "guard_always_summons_ship": false,
+    "unlisted_gift_action": "summon_bug",
+    "fixed_bug_gifts": [
+      "人气票"
+    ],
+    "new_guard_ship_sec": 1800,
+    "admiral_lamp_auto_sec": 300,
+    "pesticide_free_chance": 0.02,
+    "pesticide_base_chance": 0.05,
+    "pesticide_chance_per_yuan": 0.02,
+    "pesticide_max_chance": 0.5
+  }
+}
