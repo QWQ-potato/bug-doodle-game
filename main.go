@@ -111,7 +111,7 @@ type Rules struct {
 
 // GameEvent 推送给前端透明画布的事件协议
 type GameEvent struct {
-	Type        string `json:"type"`                   // summon_bug | kill_single | ship_lamp | blind_box
+	Type        string `json:"type"`                   // summon_bug | kill_single | ship_lamp | blind_box | pesticide | gift(不掉虫子的普通礼物)
 	Count       int    `json:"count,omitempty"`        // 数量（虫子数/杀灭数/灯牌攻击次数）
 	User        string `json:"user,omitempty"`         // 观众昵称
 	UID         int    `json:"uid,omitempty"`          // 观众 UID
@@ -1453,27 +1453,17 @@ func pesticidePower(g *message.Gift, num int) int {
 	return p
 }
 
-// randomGiftOutcome 普通礼物：先掷骰子看是不是杀虫剂，不是的话召唤随机数量的虫子（基础值的 0.5~2 倍）
+// randomGiftOutcome 普通礼物：先掷骰子看是不是杀虫剂，不是的话什么都不掉（只有人气票掉虫子）
 func randomGiftOutcome(rules *Rules, g *message.Gift, num int, base int, role string) []GameEvent {
 	if rand.Float64() < pesticideChance(rules, g) {
 		power := pesticidePower(g, num)
 		log.Printf("[B站礼物] %s(UID:%d, %s) 送出「%s」x%d -> 🧴 触发杀虫剂！消灭场上 %d%% 的虫子", g.Uname, g.Uid, role, g.GiftName, num, power)
 		return []GameEvent{{Type: "pesticide", Power: power, Count: num, User: g.Uname, UID: g.Uid, Gift: g.GiftName}}
 	}
-	if base < 1 {
-		base = 1
-	}
-	lo := base / 2
-	if lo < 1 {
-		lo = 1
-	}
-	hi := base * 2
-	count := lo + rand.Intn(hi-lo+1)
-	if count > maxBugsPerEvent {
-		count = maxBugsPerEvent
-	}
-	log.Printf("[B站礼物] %s(UID:%d, %s) 送出「%s」x%d (单价 %d %s) -> 🐛 随机召唤 %d 只虫子", g.Uname, g.Uid, role, g.GiftName, num, g.Price, g.CoinType, count)
-	return []GameEvent{{Type: "summon_bug", Count: count, User: g.Uname, UID: g.Uid, Gift: g.GiftName}}
+	// 只有人气票（fixed_bug_gifts）才掉虫子；其他礼物不召唤虫子，只推一个 gift 事件让船主人的战舰照常开炮
+	_ = base
+	log.Printf("[B站礼物] %s(UID:%d, %s) 送出「%s」x%d (单价 %d %s) -> 不掉虫子（只有人气票掉虫子）", g.Uname, g.Uid, role, g.GiftName, num, g.Price, g.CoinType)
+	return []GameEvent{{Type: "gift", Count: num, User: g.Uname, UID: g.Uid, Gift: g.GiftName}}
 }
 
 // 上舰本身由 GUARD_BUY 事件处理，礼物流里出现的舰长/提督/总督不再当普通礼物
@@ -1547,11 +1537,11 @@ func classifyGift(rules *Rules, g *message.Gift) []GameEvent {
 		log.Printf("[B站礼物] %s(UID:%d, %s) 送出「%s」x%d -> 🐛 触发召唤 %d 只虫子", g.Uname, g.Uid, role, g.GiftName, num, count)
 		return []GameEvent{{Type: "summon_bug", Count: count, User: g.Uname, UID: g.Uid, Gift: g.GiftName}}
 
-	// 4b. 其他召唤类礼物：随机数量虫子，或者杀虫剂
+	// 4b. 其他召唤类礼物：不掉虫子，只有概率变杀虫剂
 	case containsGift(rules.SummonBugGifts, g.GiftName):
 		return randomGiftOutcome(rules, g, num, bugsForUnlistedGift(g, num)*rules.BugsPerGift, role)
 
-	// 5. 其他没写进 config 的付费礼物：也召唤虫子，按价值决定数量；免费礼物不触发
+	// 5. 其他没写进 config 的付费礼物：不掉虫子，只有概率变杀虫剂；免费礼物不触发
 	default:
 		if rules.UnlistedGiftAction == "none" {
 			log.Printf("[B站礼物] %s(UID:%d, %s) 送出「%s」x%d (未配置触发规则，unlisted_gift_action=none 不处理)", g.Uname, g.Uid, role, g.GiftName, num)
@@ -1682,7 +1672,14 @@ func main() {
 	cfgPath := flag.String("config", defaultCfg, "配置文件路径")
 	roomOverride := flag.Int("room", 0, "临时指定 B站直播间号（覆盖 config.json）")
 	debugFlag := flag.Bool("debug", false, "打开详细调试日志（打印每条 B站消息）")
+	noUpdate := flag.Bool("no-update", false, "启动时不检查 GitHub 新版本")
 	flag.Parse()
+
+	log.Printf("🐛 涂鸦虫虫大作战 版本 %s", Version)
+	cleanupOldExe(exePath)
+	if !*noUpdate {
+		checkAndUpdate(exePath) // 有新版会下载替换并重启，不会返回
+	}
 
 	cfg, err := loadOrCreateConfig(*cfgPath)
 	if err != nil {

@@ -661,7 +661,7 @@
       <button class="doodle-btn btn-ship" id="btnGuard" title="模拟新上舰长：守护战舰自动攻击 30 分钟">
         <span>🛡️</span> 新舰长
       </button>
-      <button class="doodle-btn btn-box" id="btnGift" title="模拟随机付费礼物：随机数量虫子，或变成杀虫剂">
+      <button class="doodle-btn btn-box" id="btnGift" title="模拟随机付费礼物：不掉虫子，有概率变成杀虫剂">
         <span>🎲</span> 随机礼物
       </button>
       <button class="doodle-btn btn-admiral" id="btnAdmiral" title="模拟提督专属：召唤可变形尊贵机甲战舰">
@@ -6762,13 +6762,9 @@
       });
 
       document.getElementById('btnGift').addEventListener('click', () => {
-        // 模拟 5 元礼物：15% 概率杀虫剂（威力 60%），否则 2~10 只虫子
+        // 模拟 5 元礼物：15% 概率杀虫剂（威力 60%），否则不掉虫子（只有人气票掉虫子）
         if (Math.random() < 0.15) triggerPesticide(60, '测试观众', '测试礼物');
-        else {
-          const n = 2 + Math.floor(Math.random() * 9);
-          summonBugs(n, { silent: true });
-          showToast(`🎲 测试观众送出「测试礼物」，召唤了 ${n} 只虫子！`);
-        }
+        else showToast('🎲 测试观众送出「测试礼物」（只有人气票才掉虫子）');
       });
 
       btnAdmiral.addEventListener('click', () => {
