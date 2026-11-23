@@ -1240,12 +1240,25 @@
           splatColor: 'rgba(105, 219, 124, 0.42)',
           rare: true,
           hp: 3
+        },
+        {
+          id: 'dragon',
+          name: '小火龙',
+          weight: 1, // 约 0.7% 概率，比小鬼/小怪兽还稀有
+          radius: 25,
+          speed: 1.15, // 慢悠悠踱步，时不时停下来朝附近的虫子喷火
+          points: 120,
+          color: '#ff8c42',
+          splatColor: 'rgba(255, 140, 66, 0.45)',
+          rare: true,
+          hp: 4
         }
       ];
 
       const RARE_SPAWN_TEXT = {
         ghost: '👻 一只捣蛋小鬼飘进来了！拍 2 下才能赶走它～',
-        monster: '👾 稀有小怪兽出没！要拍 3 下才能打倒它！'
+        monster: '👾 稀有小怪兽出没！要拍 3 下才能打倒它！',
+        dragon: '🐉 超稀有小火龙降临！它会喷火烤虫子，拍 4 下才能打倒！'
       };
 
       function pickBugType() {
@@ -1301,10 +1314,13 @@
           hp: type.hp || 1,
           hurtFlash: 0,
           ghostAlpha: 1,
-          trail: []
+          trail: [],
+          ia: null,        // 当前正在进行的「虫际互动」（见 updateBugInteractions）
+          socialCd: 60 + Math.random() * 120, // 互动冷却，刚出生先别急着社交
+          burnt: 0         // 被小火龙烤过后身上的黑灰
         };
         if (type.rare) {
-          bug.bubble = type.id === 'ghost' ? '嘿' : '嗷';
+          bug.bubble = type.id === 'ghost' ? '嘿' : type.id === 'dragon' ? '呼' : '嗷';
           bug.state = 'move';
           showToast(RARE_SPAWN_TEXT[type.id]);
         }
@@ -1393,6 +1409,7 @@
 
       // 调试用：?debug=1 时可在控制台 debugSpawn('ghost') / debugSpawn('monster') 强制召唤稀有角色
       if (isDebugMode) {
+        window.debugBugs = () => bugs;
         window.debugSpawn = (id) => { const ok = spawnBug(null, null, id); updateHUD(); return ok; };
         window.debugHit = (id) => { const b = bugs.find((x) => x.type.id === id); if (!b) return null; hitBug(b); return bugs.includes(b) ? b.hp : 'dead'; };
       }
@@ -1404,6 +1421,9 @@
         const idx = bugs.indexOf(bug);
         if (idx === -1) return;
         bugs.splice(idx, 1);
+        bug.dead = true;
+        // 同伴被拍扁：附近的虫子吓得四散逃跑
+        if (!silent && bugs.length > 0) scareAround(bug.x, bug.y, 170, 55, bug.type.id);
 
         const now = performance.now();
         if (now - lastKillTime < 900) {
@@ -1480,6 +1500,8 @@
           ? `👻 小鬼被赶跑啦! +${gained}`
           : bug.type.id === 'monster'
           ? `👾 打倒小怪兽! +${gained}`
+          : bug.type.id === 'dragon'
+          ? `🐉 打倒小火龙! +${gained}`
           : `${words[Math.floor(Math.random() * words.length)]} +${gained}`;
 
         floatTexts.push({
@@ -1519,7 +1541,7 @@
               life: 1, decay: 0.04, color: bug.type.color
             });
           }
-          const ouch = bug.type.id === 'ghost' ? ['哎哟!', '别拍我!', '呜~'] : ['嗷呜!', '好痛!', '可恶!'];
+          const ouch = bug.type.id === 'ghost' ? ['哎哟!', '别拍我!', '呜~'] : bug.type.id === 'dragon' ? ['嗷!', '烫你哦!', '生气了!'] : ['嗷呜!', '好痛!', '可恶!'];
           floatTexts.push({ x: bug.x, y: bug.y - 26, vy: -1.4, text: `${ouch[Math.floor(Math.random() * ouch.length)]} 还剩${bug.hp}下`, color: '#7048e8', scale: 1, life: 0.9 });
           return;
         }
@@ -1544,6 +1566,446 @@
         floatTexts.push({ x: bug.x, y: bug.y - 20, vy: -1.4, text: `-1 (还剩×${bug.stack})`, color: '#7048e8', scale: 0.9, life: 0.8 });
         updateHUD();
         bumpStat(elStatKilled);
+      }
+
+      // ============================
+      // 虫际互动系统：让虫子之间有来有往
+      // ----------------------------
+      // 每只虫子身上挂一个 bug.ia = { kind, t, other, ... }，有互动时它会接管移动方向和速度：
+      //   greet  同类相遇：停下来面对面打招呼冒爱心，然后一只跟着另一只结伴走（follow）
+      //   chase  天敌追捕：蜘蛛追蚊子/蚂蚁/蜜蜂/蝴蝶，蜻蜓追蚊子，被追的一方 flee 逃命；追上了猎物会被抓晕
+      //   charge 独角仙冲撞：低头猛冲把旁边的虫子顶飞（knock 被顶飞打转 + 晕乎乎）
+      //   argue  异类撞上：两只都停下来冒 💢 吵架抖动，吵完各走各的
+      //   hide   蜗牛被碰到就缩进壳里一动不动
+      //   fan    黄金甲虫的小粉丝：附近虫子被闪光吸引跟在它屁股后面
+      //   flee   被吓跑：同伴被拍扁、小怪兽吼叫、小鬼突然冒出来、小火龙靠近
+      //   burnt  被小火龙喷火烤到：冒烟、身上发黑、哇哇乱跑
+      // 另外所有虫子（小鬼除外，它能穿墙）之间有软碰撞，不会再叠成一坨。
+      // 互动只改变移动表现，不会让虫子死亡，不影响计分。
+      // ============================
+      const IA_SCAN_EVERY = 5;           // 每隔几帧扫描一次谁和谁碰上了
+      const IA_MAX_ACTIVE_RATIO = 0.55;  // 同时在互动的虫子最多占一半多一点，避免满屏乱成一锅粥
+      const PREDATOR_PREY = {
+        spider: ['mosquito', 'ant', 'bee', 'butterfly'],
+        dragonfly: ['mosquito', 'butterfly']
+      };
+      const FLYERS = new Set(['butterfly', 'bee', 'mosquito', 'dragonfly', 'ghost']);
+
+      function bodyR(b) {
+        return b.type.radius * 1.3 * stackSizeMult(b);
+      }
+      function distTo(a, b) {
+        return Math.hypot(b.x - a.x, b.y - a.y);
+      }
+      function angleTo(a, b) {
+        return Math.atan2(b.y - a.y, b.x - a.x);
+      }
+      function iaRand(a, b) {
+        return a + Math.random() * (b - a);
+      }
+      function sayBubble(bug, text, frames = 70) {
+        bug.bubble = text;
+        bug.bubbleTimer = frames;
+      }
+      function iaFloat(x, y, text, color = '#d63c3c', scale = 0.85) {
+        if (floatTexts.length > 60) return;
+        floatTexts.push({ x, y, vy: -1.2, text, color, scale, life: 0.9 });
+      }
+      function startIA(bug, kind, other, frames, extra) {
+        bug.ia = Object.assign({ kind, other: other || null, t: frames, total: frames }, extra || {});
+      }
+      function endIA(bug, cdMin = 240, cdMax = 520) {
+        bug.ia = null;
+        bug.socialCd = iaRand(cdMin, cdMax);
+      }
+      function isBusy(b) {
+        return !!b.ia;
+      }
+      function canBeTarget(b) {
+        return !b.dead && !b.type.rare && b.scale >= 1 && !(b.ia && (b.ia.kind === 'knock' || b.ia.kind === 'burnt'));
+      }
+
+      // 以某点为中心把附近的虫子吓跑（同伴被拍扁 / 小怪兽吼叫 / 小鬼冒出来）
+      function scareAround(x, y, radius, frames, sameKindId) {
+        const src = { x, y };
+        for (const b of bugs) {
+          if (b.type.rare || b.dead) continue;
+          if (b.ia && b.ia.kind === 'knock') continue;
+          const d = Math.hypot(b.x - x, b.y - y);
+          if (d > radius) continue;
+          if (b.type.id === 'snail') {
+            startIA(b, 'hide', null, frames + 60);
+            sayBubble(b, '😳', frames);
+            continue;
+          }
+          startIA(b, 'flee', null, frames + Math.random() * 25, { src, mult: 2.1 });
+          sayBubble(b, sameKindId && b.type.id === sameKindId ? '呜' : '!', frames);
+          if (d < radius * 0.4) b.dizzy = Math.max(b.dizzy, 0.5);
+        }
+      }
+
+      // 被小火龙烤到
+      function burnBug(b, dragon) {
+        if (!canBeTarget(b)) return;
+        startIA(b, 'burnt', dragon, 95, { src: dragon, mult: 2.3 });
+        b.burnt = 360;
+        sayBubble(b, '好烫', 80);
+        iaFloat(b.x, b.y - 30, ['🔥好烫!', '🔥烤焦啦!', '🔥救命!'][Math.floor(Math.random() * 3)], '#e8590c', 0.9);
+      }
+
+      // 每帧根据互动类型返回 { angle, mult, wobble, turn }；返回 null 表示没有互动（走默认习性）
+      function steerInteraction(bug) {
+        const ia = bug.ia;
+        if (!ia) return null;
+        ia.t--;
+        const o = ia.other;
+        if (o && o.dead && ia.kind !== 'flee' && ia.kind !== 'burnt') {
+          endIA(bug, 60, 160);
+          return null;
+        }
+        if (ia.t <= 0) {
+          finishIA(bug);
+          return bug.ia ? steerInteraction(bug) : null;
+        }
+        switch (ia.kind) {
+          case 'greet': {
+            // 先互相凑过去，碰到了才停下来打招呼
+            const gd = distTo(bug, o);
+            if (gd > (bodyR(bug) + bodyR(o)) * 1.05 && ia.approach-- > 0) {
+              ia.t++;
+              return { angle: angleTo(bug, o), mult: Math.min(1.6, 0.9 / Math.max(0.3, bug.type.speed) + 0.6), wobble: 0, turn: 0.18 };
+            }
+            if (ia.t % 22 === 0 && ia.lead) iaFloat((bug.x + o.x) / 2, (bug.y + o.y) / 2 - 30, bug.type.id === 'ant' ? '👋' : '♥', '#e64980', 0.9);
+            return { angle: angleTo(bug, o), mult: 0.04, wobble: 0, turn: 0.2 };
+          }
+          case 'follow':
+          case 'fan': {
+            if (o.ia && (o.ia.kind === 'knock' || o.ia.kind === 'burnt')) { endIA(bug); return null; }
+            const gap = bodyR(o) + bodyR(bug) * 0.9;
+            const tx = o.x - Math.cos(o.angle) * gap;
+            const ty = o.y - Math.sin(o.angle) * gap;
+            const d = Math.hypot(tx - bug.x, ty - bug.y);
+            if (d > 380) { endIA(bug); return null; } // 跟丢了
+            const want = o.type.speed / bug.type.speed;
+            const mult = d < 10 ? Math.min(1, want) * 0.4 : Math.min(2.4, Math.max(0.5, want * (0.7 + d / 90)));
+            return { angle: Math.atan2(ty - bug.y, tx - bug.x), mult, wobble: 0, turn: 0.16 };
+          }
+          case 'chase': {
+            const d = distTo(bug, o);
+            if (d < bodyR(bug) + bodyR(o) * 0.6) {
+              // 抓到了！猎物被抓晕，挣扎着逃走
+              o.dizzy = 1;
+              startIA(o, 'flee', bug, 80, { src: bug, mult: 1.5 });
+              sayBubble(o, '@', 80);
+              iaFloat(o.x, o.y - 28, bug.type.id === 'spider' ? '🕸️抓到啦!' : '💥抓到啦!', '#7048e8', 0.95);
+              sayBubble(bug, '♪', 90);
+              endIA(bug, 360, 700);
+              return null;
+            }
+            if (d > 420) { sayBubble(bug, '…', 60); endIA(bug); return null; }
+            // 猎物持续逃跑
+            if (!o.ia || o.ia.kind !== 'flee') {
+              if (canBeTarget(o)) {
+                startIA(o, 'flee', bug, ia.t + 20, { src: bug, mult: 1.55 });
+                sayBubble(o, '救命', 60);
+              }
+            }
+            return { angle: angleTo(bug, o), mult: bug.type.id === 'spider' ? 1.25 : 1.05, wobble: 0, turn: 0.22 };
+          }
+          case 'charge': {
+            const d = distTo(bug, o);
+            if (d < bodyR(bug) + bodyR(o) * 0.8) {
+              const a = angleTo(bug, o);
+              const power = 13 / Math.sqrt(stackSizeMult(o));
+              startIA(o, 'knock', null, 42, { kx: Math.cos(a) * power, ky: Math.sin(a) * power, spin: (Math.random() < 0.5 ? -1 : 1) * 0.38 });
+              o.dizzy = 1;
+              sayBubble(o, '@', 90);
+              iaFloat((bug.x + o.x) / 2, (bug.y + o.y) / 2 - 24, ['咚!', '顶飞!', '哐!'][Math.floor(Math.random() * 3)], '#6c4a32', 1.05);
+              if (screenShake < 4) screenShake = 4;
+              for (let i = 0; i < 6; i++) {
+                const pa = a + Math.PI + (Math.random() - 0.5) * 1.6;
+                particles.push({ kind: 'puff', x: o.x, y: o.y, vx: Math.cos(pa) * 2.5, vy: Math.sin(pa) * 2.5, size: 5 + Math.random() * 5, life: 1, decay: 0.05, color: '#6c4a32' });
+              }
+              playPopSound(-3);
+              sayBubble(bug, '哼哼', 70);
+              endIA(bug, 400, 800);
+              return null;
+            }
+            if (d > 320) { endIA(bug); return null; }
+            return { angle: angleTo(bug, o), mult: 2.7, wobble: 0, turn: 0.2 };
+          }
+          case 'argue': {
+            // 面对面抖动吵架
+            bug.x += Math.sin(frameCount * 1.1 + (ia.lead ? 0 : 1.5)) * 1.1;
+            if (ia.lead && ia.t % 24 === 0) iaFloat((bug.x + o.x) / 2, (bug.y + o.y) / 2 - 30, '💢', '#e03131', 0.9);
+            return { angle: angleTo(bug, o), mult: 0, wobble: 0, turn: 0.25 };
+          }
+          case 'leave': {
+            return { angle: angleTo(o, bug), mult: 1.25, wobble: 0, turn: 0.15 };
+          }
+          case 'hide':
+            return { angle: null, mult: 0, wobble: 0 };
+          case 'knock': {
+            bug.x += ia.kx;
+            bug.y += ia.ky;
+            ia.kx *= 0.88;
+            ia.ky *= 0.88;
+            bug.angle += ia.spin * (ia.t / ia.total);
+            bug.targetAngle = bug.angle;
+            return { angle: null, mult: 0, wobble: 0 };
+          }
+          case 'flee':
+          case 'burnt': {
+            const s = ia.src || o;
+            if (ia.kind === 'burnt' && frameCount % 5 === 0) {
+              particles.push({ kind: 'smoke', x: bug.x + (Math.random() - 0.5) * 14, y: bug.y - 10, vx: (Math.random() - 0.5) * 0.6, vy: -1.2, size: 5 + Math.random() * 4, life: 1, decay: 0.03 });
+            }
+            const panic = (Math.random() - 0.5) * 0.5;
+            const away = s ? Math.atan2(bug.y - s.y, bug.x - s.x) : bug.angle;
+            return { angle: away + panic, mult: ia.mult || 1.8, wobble: 0, turn: 0.2 };
+          }
+        }
+        return null;
+      }
+
+      // 一段互动结束时，决定要不要接着下一段
+      function finishIA(bug) {
+        const ia = bug.ia;
+        const o = ia.other;
+        if (ia.kind === 'greet') {
+          if (!ia.lead && o && !o.dead) {
+            startIA(bug, 'follow', o, iaRand(220, 420));
+            sayBubble(bug, '♪', 80);
+            return;
+          }
+          endIA(bug, 160, 300);
+          sayBubble(bug, '♪', 60);
+          return;
+        }
+        if (ia.kind === 'argue') {
+          if (o && !o.dead) {
+            startIA(bug, 'leave', o, 45);
+            sayBubble(bug, '哼', 60);
+            return;
+          }
+        }
+        if (ia.kind === 'hide' && bug.type.id === 'snail') sayBubble(bug, '?', 50);
+        endIA(bug);
+      }
+
+      // 扫描谁和谁碰上了，安排新的互动
+      function scanInteractions() {
+        let active = 0;
+        for (const b of bugs) if (b.ia) active++;
+        const cap = Math.max(4, Math.floor(bugs.length * IA_MAX_ACTIVE_RATIO));
+
+        // 黄金甲虫：闪闪发光，附近路过的虫子会变成小粉丝跟在它后面（最多 4 个）
+        for (const g of bugs) {
+          if (g.type.id !== 'golden' || g.dead || g.ia || g.socialCd > 0) continue;
+          g.socialCd = 45;
+          let fans = 0;
+          for (const o of bugs) if (o.ia && o.ia.kind === 'fan' && o.ia.other === g) fans++;
+          g.fanCount = fans;
+          for (const o of bugs) {
+            if (fans >= 4) break;
+            if (o === g || o.ia || !canBeTarget(o) || o.type.id === 'golden' || o.type.id === 'snail') continue;
+            if (distTo(g, o) < 220 && Math.random() < 0.3) {
+              startIA(o, 'fan', g, iaRand(240, 420));
+              sayBubble(o, '✨', 90);
+              fans++;
+              g.fanCount = fans;
+              active++;
+            }
+          }
+        }
+
+        for (const b of bugs) {
+          if (active >= cap) break;
+          if (b.ia || b.dead || b.scale < 1 || b.socialCd > 0 || b.type.rare) continue;
+          const id = b.type.id;
+
+          if (id === 'golden') continue; // 黄金甲虫在上面单独处理
+
+          // 天敌：找猎物
+          const preyList = PREDATOR_PREY[id];
+          if (preyList) {
+            let prey = null, best = 250;
+            for (const o of bugs) {
+              if (o === b || !canBeTarget(o) || !preyList.includes(o.type.id)) continue;
+              if ((o.stack || 1) > (b.stack || 1)) continue; // 不敢追比自己大的合体虫
+              const d = distTo(b, o);
+              if (d < best) { best = d; prey = o; }
+            }
+            if (prey && Math.random() < 0.45) {
+              startIA(b, 'chase', prey, iaRand(140, 200));
+              sayBubble(b, '!', 60);
+              active++;
+              continue;
+            }
+          }
+
+          // 找最近的邻居 + 最近的同类
+          let near = null, nd = Infinity, mate = null, md = 240;
+          for (const o of bugs) {
+            if (o === b || o.dead || o.type.rare || o.scale < 1) continue;
+            const d = distTo(b, o);
+            if (d < nd) { nd = d; near = o; }
+            if (o.type.id === id && !o.ia && o.socialCd <= 0 && d < md) { md = d; mate = o; }
+          }
+          // 看到同类：互相凑过去打招呼 → 结伴走（蜗牛太慢就算了）
+          if (mate && id !== 'snail' && Math.random() < 0.5) {
+            const lead = Math.random() < 0.5;
+            startIA(b, 'greet', mate, 55, { lead, approach: 150 });
+            startIA(mate, 'greet', b, 55, { lead: !lead, approach: 150 });
+            sayBubble(b, id === 'ant' ? '嗨' : '♥', 70);
+            sayBubble(mate, id === 'ant' ? '嗨' : '♥', 70);
+            active += 2;
+            continue;
+          }
+          if (!near) { b.socialCd = 40; continue; }
+          const touchD = bodyR(b) + bodyR(near);
+
+          // 独角仙：看到旁边有虫就低头冲撞
+          if (id === 'rhino' && nd < 200 && canBeTarget(near) && !near.ia && Math.random() < 0.35) {
+            startIA(b, 'charge', near, 80);
+            sayBubble(b, '💢', 60);
+            active++;
+            continue;
+          }
+
+          if (nd > touchD * 1.6 || near.ia || near.socialCd > 0) {
+            b.socialCd = iaRand(20, 50);
+            continue;
+          }
+
+          const r = Math.random();
+          if (near.type.id === 'snail' && near.type.id !== id && r < 0.7) {
+            // 碰到蜗牛：蜗牛缩壳
+            startIA(near, 'hide', null, iaRand(120, 200));
+            sayBubble(near, '😳', 90);
+            sayBubble(b, '?', 50);
+            b.socialCd = 200;
+            active++;
+          } else if (near.type.id !== id && r < 0.45 && !FLYERS.has(id) && !FLYERS.has(near.type.id)) {
+            // 两只地上爬的异类撞个正着：吵一架
+            startIA(b, 'argue', near, 60, { lead: true });
+            startIA(near, 'argue', b, 60, { lead: false });
+            sayBubble(b, '💢', 60);
+            sayBubble(near, '💢', 60);
+            active += 2;
+          } else {
+            b.socialCd = iaRand(80, 160);
+          }
+        }
+      }
+
+      // 软碰撞：别叠在一起（小鬼能穿过去，飞虫和爬虫互不挡路）
+      function separateBugs() {
+        const n = bugs.length;
+        for (let i = 0; i < n; i++) {
+          const a = bugs[i];
+          if (a.type.id === 'ghost') continue;
+          const ra = bodyR(a);
+          const fa = FLYERS.has(a.type.id);
+          for (let k = i + 1; k < n; k++) {
+            const b = bugs[k];
+            if (b.type.id === 'ghost' || fa !== FLYERS.has(b.type.id)) continue;
+            const dx = b.x - a.x, dy = b.y - a.y;
+            const minD = (ra + bodyR(b)) * 0.78;
+            const d2 = dx * dx + dy * dy;
+            if (d2 >= minD * minD || d2 < 0.01) continue;
+            const d = Math.sqrt(d2);
+            const push = (minD - d) * 0.18;
+            const nx = dx / d, ny = dy / d;
+            // 大块头不容易被推动
+            const wa = bodyR(b) / (ra + bodyR(b));
+            const wb = 1 - wa;
+            a.x -= nx * push * wa; a.y -= ny * push * wa;
+            b.x += nx * push * wb; b.y += ny * push * wb;
+          }
+        }
+      }
+
+      function updateBugInteractions() {
+        for (const b of bugs) {
+          if (b.socialCd > 0) b.socialCd--;
+          if (b.dizzy > 0) b.dizzy = Math.max(0, b.dizzy - 0.008);
+          if (b.burnt > 0) b.burnt--;
+        }
+        if (frameCount % IA_SCAN_EVERY === 0) scanInteractions();
+        separateBugs();
+      }
+
+      // 小火龙：找附近的虫子转过去喷火
+      function updateDragon(bug) {
+        const st = bug.state;
+        if (st === 'breathe') {
+          const t = bug.fireTarget;
+          if (t && !t.dead) bug.targetAngle = angleTo(bug, t);
+          bug.turnTimer = Math.max(bug.turnTimer, 10);
+          const face = Math.cos(bug.angle) < 0 ? -1 : 1;
+          const s = bug.scale * 2 * stackSizeMult(bug);
+          const mx = bug.x + face * 21 * s;
+          const my = bug.y - 1 * s;
+          const fireA = t && !t.dead ? Math.atan2(t.y - my, t.x - mx) : (face > 0 ? 0 : Math.PI);
+          bug.fireAngle = fireA;
+          const warm = bug.behaviorTimer > 50; // 前几帧先吸气
+          if (!warm) {
+            for (let i = 0; i < 3; i++) {
+              const a = fireA + (Math.random() - 0.5) * 0.45;
+              const spd = 8 + Math.random() * 5;
+              particles.push({ kind: 'fire', x: mx, y: my, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd, size: 6 + Math.random() * 6, life: 1, decay: 0.03 + Math.random() * 0.015 });
+            }
+            if (bug.behaviorTimer % 4 === 0) {
+              for (const o of bugs) {
+                if (o === bug || o.type.rare || o.dead) continue;
+                const d = Math.hypot(o.x - mx, o.y - my);
+                if (d > 200) continue;
+                let diff = Math.atan2(o.y - my, o.x - mx) - fireA;
+                while (diff > Math.PI) diff -= Math.PI * 2;
+                while (diff < -Math.PI) diff += Math.PI * 2;
+                if (Math.abs(diff) < 0.42 + 18 / Math.max(30, d)) {
+                  if (!(o.ia && o.ia.kind === 'burnt')) burnBug(o, bug);
+                }
+              }
+            }
+          }
+          if (bug.behaviorTimer <= 0) {
+            bug.state = 'move';
+            bug.fireTarget = null;
+            bug.behaviorTimer = 150 + Math.random() * 160;
+          }
+          return 0;
+        }
+        // 平时：附近的虫子会躲着火龙走
+        if (frameCount % 15 === 0) {
+          for (const o of bugs) {
+            if (o === bug || !canBeTarget(o) || (o.ia && o.ia.kind === 'flee')) continue;
+            if (distTo(bug, o) < 120 + bodyR(o)) {
+              if (o.type.id === 'snail') { if (!o.ia) { startIA(o, 'hide', null, 120); sayBubble(o, '😳', 80); } continue; }
+              startIA(o, 'flee', bug, 50, { src: bug, mult: 1.6 });
+              sayBubble(o, '!', 50);
+            }
+          }
+        }
+        if (bug.behaviorTimer <= 0) {
+          let target = null, best = 280;
+          for (const o of bugs) {
+            if (o === bug || !canBeTarget(o)) continue;
+            const d = distTo(bug, o);
+            if (d < best) { best = d; target = o; }
+          }
+          if (target) {
+            bug.state = 'breathe';
+            bug.fireTarget = target;
+            bug.behaviorTimer = 70;
+            sayBubble(bug, '吼', 70);
+            playSpraySound();
+          } else {
+            bug.behaviorTimer = 45;
+          }
+        }
+        return 1;
       }
 
       // ============================
@@ -2017,7 +2479,10 @@
           ctx.fill();
 
         } else if (id === 'snail') {
-          // 慢吞吞蜗牛：软软身体 + 螺旋手绘壳 + 眼柄触角
+          // 慢吞吞蜗牛：软软身体 + 螺旋手绘壳 + 眼柄触角（被碰到就缩进壳里）
+          const hiding = bug.ia && bug.ia.kind === 'hide';
+          if (hiding) ctx.translate(Math.sin(frameCount * 0.9) * 0.6, 0);
+          if (!hiding) {
           ctx.fillStyle = '#ffe8cc';
           ctx.beginPath();
           ctx.ellipse(2, 0, 18, 6.5, 0, 0, Math.PI * 2);
@@ -2033,6 +2498,7 @@
           ctx.arc(24, -7, 2.2, 0, Math.PI * 2);
           ctx.arc(24, 7, 2.2, 0, Math.PI * 2);
           ctx.fill();
+          }
 
           // 螺旋外壳
           ctx.fillStyle = '#e9c46a';
@@ -2433,6 +2899,192 @@
           ctx.moveTo(-2, roaring ? 3 : 5); ctx.lineTo(-1, roaring ? 6 : 7.5); ctx.lineTo(0, roaring ? 3 : 5);
           ctx.moveTo(2, roaring ? 3 : 5); ctx.lineTo(3, roaring ? 6 : 7.5); ctx.lineTo(4, roaring ? 3 : 5);
           ctx.fill();
+        } else if (id === 'dragon') {
+          // 小火龙：圆滚滚橙色身体 + 奶油色肚皮 + 小蝙蝠翅膀 + 尾巴尖一簇小火苗
+          ctx.rotate(-bug.angle);
+          const face = Math.cos(bug.angle) < 0 ? -1 : 1;
+          ctx.scale(face, 1);
+          const breathing = bug.state === 'breathe';
+          const inhale = breathing && bug.behaviorTimer > 50;
+          const step = breathing ? 0 : Math.sin(bug.wigglePhase) * 2.5;
+          const bob = Math.abs(Math.sin(bug.wigglePhase * 0.5)) * -1.5;
+          ctx.translate(breathing ? -1.5 : 0, bob);
+          const bodyColor = bug.hurtFlash > 0 ? '#ffa8a8' : '#ff8c42';
+          const flap = Math.sin(frameCount * (breathing ? 0.15 : 0.3) + bug.wigglePhase);
+          // 尾巴 + 尾巴尖火苗
+          ctx.strokeStyle = '#2b2a29';
+          ctx.fillStyle = bodyColor;
+          ctx.beginPath();
+          ctx.moveTo(-9, 2);
+          ctx.quadraticCurveTo(-22, 10 + step * 0.5, -25, -2);
+          ctx.quadraticCurveTo(-21, 4, -10, 9);
+          ctx.closePath();
+          ctx.fill(); ctx.stroke();
+          const flick = Math.sin(frameCount * 0.5 + bug.wigglePhase) * 1.5;
+          ctx.fillStyle = '#ff6b6b';
+          ctx.beginPath();
+          ctx.moveTo(-25, -1);
+          ctx.quadraticCurveTo(-31 + flick, -6, -27, -13 + flick);
+          ctx.quadraticCurveTo(-25, -8, -22, -11 - flick);
+          ctx.quadraticCurveTo(-21, -5, -25, -1);
+          ctx.fill(); ctx.stroke();
+          ctx.fillStyle = '#ffe066';
+          ctx.beginPath();
+          ctx.ellipse(-25, -6, 1.6, 3, 0, 0, Math.PI * 2);
+          ctx.fill();
+          // 后翅膀
+          ctx.fillStyle = '#ffc078';
+          ctx.save();
+          ctx.translate(-3, -9);
+          ctx.rotate(-0.5 + flap * 0.25);
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.lineTo(-6, -15);
+          ctx.quadraticCurveTo(-9, -8, -14, -9);
+          ctx.quadraticCurveTo(-9, -3, -12, 1);
+          ctx.closePath();
+          ctx.fill(); ctx.stroke();
+          ctx.restore();
+          // 小短腿
+          ctx.fillStyle = bodyColor;
+          ctx.beginPath();
+          ctx.ellipse(-5, 14 + Math.max(0, step), 4, 3.3, 0, 0, Math.PI * 2);
+          ctx.fill(); ctx.stroke();
+          ctx.beginPath();
+          ctx.ellipse(6, 14 + Math.max(0, -step), 4, 3.3, 0, 0, Math.PI * 2);
+          ctx.fill(); ctx.stroke();
+          // 背上小尖刺
+          ctx.fillStyle = '#ffe066';
+          ctx.beginPath();
+          for (let k = 0; k < 3; k++) {
+            const bx = -9 + k * 5;
+            const by = -8 + k * -1.2;
+            ctx.moveTo(bx - 2.5, by + 1.5);
+            ctx.lineTo(bx - 1, by - 4);
+            ctx.lineTo(bx + 2, by + 0.5);
+          }
+          ctx.fill(); ctx.stroke();
+          // 圆身体
+          ctx.fillStyle = bodyColor;
+          ctx.beginPath();
+          ctx.ellipse(-1, 3, 12.5, 10.5, 0, 0, Math.PI * 2);
+          ctx.fill(); ctx.stroke();
+          // 肚皮 + 横纹
+          ctx.fillStyle = '#fff3bf';
+          ctx.beginPath();
+          ctx.ellipse(3, 6, 6.5, 6, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          ctx.moveTo(-0.5, 4); ctx.lineTo(6.5, 4);
+          ctx.moveTo(-0.5, 7.5); ctx.lineTo(6.5, 7.5);
+          ctx.stroke();
+          ctx.lineWidth = 2.4;
+          // 大脑袋（吸气时鼓起来）
+          const hs = inhale ? 1.08 : 1;
+          ctx.save();
+          ctx.translate(10, -8);
+          ctx.scale(hs, hs);
+          // 小角
+          ctx.fillStyle = '#fff3bf';
+          ctx.beginPath();
+          ctx.moveTo(-5, -7); ctx.lineTo(-8, -14); ctx.lineTo(-1, -9);
+          ctx.closePath();
+          ctx.moveTo(1, -9); ctx.lineTo(1, -16); ctx.lineTo(5, -8);
+          ctx.closePath();
+          ctx.fill(); ctx.stroke();
+          ctx.fillStyle = bodyColor;
+          ctx.beginPath();
+          ctx.arc(0, 0, 9.5, 0, Math.PI * 2);
+          ctx.fill(); ctx.stroke();
+          // 鼻子
+          ctx.beginPath();
+          ctx.ellipse(8, 3, 6, 4.5, 0, 0, Math.PI * 2);
+          ctx.fill(); ctx.stroke();
+          ctx.fillStyle = '#2b2a29';
+          ctx.beginPath();
+          ctx.arc(10.5, 1.5, 0.9, 0, Math.PI * 2);
+          ctx.arc(12.5, 2.5, 0.9, 0, Math.PI * 2);
+          ctx.fill();
+          // 眼睛
+          if (bug.hurtFlash > 0 || bug.dizzy > 0) {
+            ctx.lineWidth = 1.6;
+            ctx.beginPath();
+            ctx.moveTo(-1, -5); ctx.lineTo(4, -1);
+            ctx.moveTo(4, -5); ctx.lineTo(-1, -1);
+            ctx.stroke();
+            ctx.lineWidth = 2.4;
+          } else if (inhale) {
+            // 憋气眯眼
+            ctx.lineWidth = 1.8;
+            ctx.beginPath();
+            ctx.moveTo(-1, -3); ctx.quadraticCurveTo(1.5, -5.5, 4, -3);
+            ctx.stroke();
+            ctx.lineWidth = 2.4;
+          } else {
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(1.5, -3, 3.8, 0, Math.PI * 2);
+            ctx.fill(); ctx.stroke();
+            const blink = (frameCount + Math.floor(bug.wigglePhase * 10)) % 170 < 6;
+            ctx.fillStyle = '#2b2a29';
+            ctx.beginPath();
+            if (blink) ctx.ellipse(2.5, -3, 2.4, 0.7, 0, 0, Math.PI * 2);
+            else ctx.arc(2.6, -3, 2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(3.3, -3.8, 0.7, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          // 腮红
+          ctx.fillStyle = 'rgba(255, 107, 107, 0.5)';
+          ctx.beginPath();
+          ctx.arc(-3, 3.5, 2.2, 0, Math.PI * 2);
+          ctx.fill();
+          // 嘴：喷火时张大
+          ctx.fillStyle = '#2b2a29';
+          ctx.beginPath();
+          if (breathing && !inhale) {
+            ctx.ellipse(10, 7, 4, 3, 0, 0, Math.PI * 2);
+            ctx.fill();
+          } else {
+            ctx.lineWidth = 1.6;
+            ctx.moveTo(4, 6.5); ctx.quadraticCurveTo(7, 8.5, 10, 6.5);
+            ctx.stroke();
+            ctx.lineWidth = 2.4;
+          }
+          ctx.restore();
+          // 前翅膀
+          ctx.fillStyle = '#ffd8a8';
+          ctx.save();
+          ctx.translate(-1, -6);
+          ctx.rotate(-0.25 + flap * 0.35);
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.lineTo(-4, -17);
+          ctx.quadraticCurveTo(-8, -10, -13, -11);
+          ctx.quadraticCurveTo(-8, -5, -11, 0);
+          ctx.closePath();
+          ctx.fill(); ctx.stroke();
+          ctx.restore();
+          // 鼻孔冒小烟圈
+          if (!breathing && frameCount % 50 === 0) {
+            particles.push({ kind: 'puff', x: bug.x + face * 36, y: bug.y - 12, vx: face * 0.4, vy: -0.8, size: 3 + Math.random() * 2, life: 1, decay: 0.03, color: '#868e96' });
+          }
+        }
+
+        // 被小火龙烤过：身上留几块黑灰
+        if (bug.burnt > 0 && !bug.type.rare) {
+          ctx.save();
+          ctx.globalAlpha *= Math.min(1, bug.burnt / 90) * 0.7;
+          ctx.fillStyle = '#212529';
+          ctx.beginPath();
+          ctx.ellipse(-4, -3, 4.5, 3, 0.4, 0, Math.PI * 2);
+          ctx.ellipse(5, 4, 3.5, 2.4, -0.3, 0, Math.PI * 2);
+          ctx.ellipse(1, -7, 2.2, 1.6, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
         }
 
         ctx.restore();
@@ -6449,6 +7101,8 @@
         const marginTop = hideHud ? 30 : 86;
         const marginBottom = isObsMode ? height - 30 : height - 150;
 
+        updateBugInteractions();
+
         for (const bug of bugs) {
           // 出生弹跳缩放
           if (bug.scale < 1) {
@@ -6540,6 +7194,8 @@
                 bug.behaviorTimer = 30;
                 bug.bubble = ['嘿嘿', '略~', '来呀'][Math.floor(Math.random() * 3)];
                 bug.bubbleTimer = 90;
+                // 突然冒出来吓唬附近的虫子
+                scareAround(bug.x, bug.y, 190, 60);
               } else {
                 bug.state = 'move';
                 bug.behaviorTimer = 200 + Math.random() * 220;
@@ -6562,11 +7218,30 @@
                 bug.bubble = ['嗷!', '吼~', '饿!'][Math.floor(Math.random() * 3)];
                 bug.bubbleTimer = 60;
                 if (screenShake < 3) screenShake = 3;
+                // 一吼，附近的虫子全吓跑
+                scareAround(bug.x, bug.y, 230, 70);
               }
             }
             speedMult *= bug.state === 'roar' ? 0 : 1;
+          } else if (id === 'golden') {
+            // 有小粉丝跟着时，黄金甲虫放慢脚步「走红毯」，不然粉丝追不上
+            if (bug.fanCount > 0) speedMult *= 0.4;
+          } else if (id === 'dragon') {
+            // 小火龙：慢慢踱步，时不时转向附近的虫子喷火
+            wobble = Math.sin(frameCount * 0.07 + bug.wigglePhase) * 0.2;
+            speedMult *= updateDragon(bug);
           }
           if (bug.hurtFlash > 0) bug.hurtFlash = Math.max(0, bug.hurtFlash - 0.05);
+
+          // 虫际互动接管移动（追/逃/结伴/吵架/被顶飞…）
+          const iaSteer = bug.ia ? steerInteraction(bug) : null;
+          if (iaSteer) {
+            speedMult = (bug.dizzy > 0 ? 0.35 : 1) * (bug.speedFactor || 1) * iaSteer.mult;
+            wobble = iaSteer.wobble != null ? iaSteer.wobble : wobble * 0.3;
+            if (iaSteer.angle != null) bug.targetAngle = iaSteer.angle;
+            bug.turnTimer = Math.max(bug.turnTimer, 10);
+            if (id === 'grasshopper') bug.hopAir = 0;
+          }
 
           bug.wigglePhase += (id === 'snail' ? 0.06 : 0.22) * Math.max(0.5, bug.type.speed * (bug.state === 'pause' ? 0.15 : 1));
 
@@ -6586,7 +7261,7 @@
           let diff = bug.targetAngle - bug.angle;
           while (diff > Math.PI) diff -= Math.PI * 2;
           while (diff < -Math.PI) diff += Math.PI * 2;
-          const turnSmooth = (id === 'snail' || id === 'rhino') ? 0.05 : (id === 'dragonfly' || id === 'cockroach' ? 0.18 : 0.1);
+          const turnSmooth = (iaSteer && iaSteer.turn) || ((id === 'snail' || id === 'rhino') ? 0.05 : (id === 'dragonfly' || id === 'cockroach' ? 0.18 : 0.1));
           bug.angle += diff * turnSmooth;
 
           bug.vx = Math.cos(bug.angle + wobble) * bug.type.speed * speedMult;
@@ -6659,7 +7334,14 @@
           ctx.translate(p.x, p.y);
           if (p.rot) ctx.rotate(p.rot);
 
-          if (p.kind === 'smoke') {
+          if (p.kind === 'fire') {
+            const r = p.size * (0.5 + (1 - p.life) * 1.1);
+            ctx.globalAlpha = Math.min(1, p.life * 1.3);
+            ctx.fillStyle = p.life > 0.7 ? '#ffe066' : p.life > 0.4 ? '#ff922b' : '#e8590c';
+            ctx.beginPath();
+            ctx.arc(0, 0, r, 0, Math.PI * 2);
+            ctx.fill();
+          } else if (p.kind === 'smoke') {
             const r = p.size * (1.8 - p.life);
             ctx.globalAlpha = p.life * 0.55;
             ctx.fillStyle = '#343a40';
