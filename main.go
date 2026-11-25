@@ -33,6 +33,7 @@ import (
 	"github.com/Akegarasu/blivedm-go/packet"
 	"github.com/andybalholm/brotli"
 	"github.com/gorilla/websocket"
+	"github.com/tidwall/gjson"
 )
 
 //go:embed index.html live-bg.jpg config.json
@@ -1432,6 +1433,10 @@ func runBilibiliWSLoop(c *client.Client, roomID int, cookie string, onGiftFn fun
 								log.Printf("⚠️ [B站礼物] SEND_GIFT_V2 缺少 pb 字段: %.200s", string(pkt.Body))
 							}
 							continue
+						case "DANMU_MSG":
+							// 弹幕库不解析头像，这里从原始包里记下发言人的头像（上舰时用），然后照常交给弹幕库
+							info := gjson.GetBytes(pkt.Body, "info")
+							rememberFace(int(info.Get("2.0").Int()), info.Get("0.15.user.base.face").String())
 						default:
 							if strings.Contains(baseCmd, "GIFT") || strings.Contains(baseCmd, "COMBO") {
 								log.Printf("ℹ️ [B站其他礼物事件] cmd=%s", hdrObj.Cmd)
@@ -1625,6 +1630,7 @@ func startBilibiliClient(cfg *Config, hub *WSHub) (stop func()) {
 	// 打印醒目留言 (SC) 日志
 	c.OnSuperChat(func(sc *message.SuperChat) {
 		log.Printf("[B站SC] %s (¥%d): %s", sc.UserInfo.Uname, sc.Price, sc.Message)
+		rememberFace(sc.Uid, sc.UserInfo.Face)
 	})
 
 	// 打印上舰日志
