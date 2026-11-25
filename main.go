@@ -319,11 +319,61 @@ func admiralEvent(rules *Rules, uid int, user, avatar, gift string, count, lamps
 	}, lamps, rules.AdmiralLampAutoSec)
 }
 
-func guardShipEvent(rules *Rules, uid int, user, gift string) GameEvent {
+func guardShipEvent(rules *Rules, uid int, user, avatar, gift string) GameEvent {
 	return GameEvent{
 		Type: "ship_lamp", Mode: "guard", Count: 3, User: user, UID: uid, Gift: gift,
+		Avatar:      avatar,
 		DurationSec: rules.NewGuardShipSec, UltHits: rules.ShipUltHits,
 	}
+}
+
+// userFaces 记住礼物/SC 里见过的观众头像（uid -> 原始头像 URL）。
+// B站的上舰消息（GUARD_BUY）不带头像，召唤舰长/提督船时靠它和下面的接口补上
+var userFaces sync.Map
+
+func rememberFace(uid int, face string) {
+	if uid > 0 && face != "" {
+		userFaces.Store(uid, face)
+	}
+}
+
+// lookupUserFace 查观众头像：先等一小会儿看礼物流里有没有带头像的同一个人，再查 B站直播接口
+func lookupUserFace(uid int) string {
+	if uid <= 0 {
+		return ""
+	}
+	for i := 0; i < 8; i++ { // 上舰的 SEND_GIFT 往往紧跟着 GUARD_BUY 到，最多等 0.8 秒
+		if v, ok := userFaces.Load(uid); ok {
+			return v.(string)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	req, err := http.NewRequest("GET", fmt.Sprintf("https://api.live.bilibili.com/live_user/v1/Master/info?uid=%d", uid), nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+	req.Header.Set("Referer", "https://live.bilibili.com/")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		log.Printf("[头像] 查询 UID:%d 头像失败: %v", uid, err)
+		return ""
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Code int `json:"code"`
+		Data struct {
+			Info struct {
+				Face string `json:"face"`
+			} `json:"info"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.Code != 0 || out.Data.Info.Face == "" {
+		log.Printf("[头像] 查询 UID:%d 头像没拿到 (code=%d err=%v)", uid, out.Code, err)
+		return ""
+	}
+	rememberFace(uid, out.Data.Info.Face)
+	return out.Data.Info.Face
 }
 
 // WSHub 管理所有连接到后端的 OBS/浏览器画布
@@ -1580,21 +1630,29 @@ func startBilibiliClient(cfg *Config, hub *WSHub) (stop func()) {
 	// 打印上舰日志
 	c.OnGuardBuy(func(gb *message.GuardBuy) {
 		log.Printf("[B站上舰] %s(UID:%d) 开通了「%s」(%s) x%d", gb.Username, gb.Uid, gb.GiftName, guardLevelName(gb.GuardLevel), gb.Num)
-		switch gb.GuardLevel {
-		case 1, 2:
-			ev := admiralEvent(&cfg.Rules, gb.Uid, gb.Username, "", gb.GiftName, 3, 0)
-			log.Printf("[B站上舰] -> 👑 召唤提督至尊舰船(%s)，当天常驻（北京时间 24 点消失）", ev.ShipClass)
-			hub.Broadcast(ev)
-		case 3:
-			log.Printf("[B站上舰] -> 🛡️ 召唤新舰长守护战舰，自动守护 %d 分钟", cfg.Rules.NewGuardShipSec/60)
-			hub.Broadcast(guardShipEvent(&cfg.Rules, gb.Uid, gb.Username, gb.GiftName))
+		if gb.GuardLevel < 1 || gb.GuardLevel > 3 {
+			return
 		}
+		// 上舰消息不带头像，另起协程查到头像再召唤，不卡住 B站读包循环
+		go func() {
+			avatar := proxyAvatarURL(lookupUserFace(gb.Uid))
+			switch gb.GuardLevel {
+			case 1, 2:
+				ev := admiralEvent(&cfg.Rules, gb.Uid, gb.Username, avatar, gb.GiftName, 3, 0)
+				log.Printf("[B站上舰] -> 👑 召唤提督至尊舰船(%s)，当天常驻（北京时间 24 点消失），头像=%v", ev.ShipClass, avatar != "")
+				hub.Broadcast(ev)
+			case 3:
+				log.Printf("[B站上舰] -> 🛡️ 召唤新舰长守护战舰，自动守护 %d 分钟，头像=%v", cfg.Rules.NewGuardShipSec/60, avatar != "")
+				hub.Broadcast(guardShipEvent(&cfg.Rules, gb.Uid, gb.Username, avatar, gb.GiftName))
+			}
+		}()
 	})
 
 	// 监听礼物事件（唯一交互入口）：解析成游戏事件后推给画布
 	onGiftFn := func(g *message.Gift) {
 		log.Printf("🎁 [B站礼物-原始] uid=%d uname=%q giftName=%q originalGiftName=%q num=%d price=%d coin=%s tid=%s guard=%d medalGuard=%d",
 			g.Uid, g.Uname, g.GiftName, g.OriginalGiftName, g.Num, g.Price, g.CoinType, g.Tid, g.GuardLevel, g.MedalInfo.GuardLevel)
+		rememberFace(g.Uid, g.Face)
 		num := g.Num
 		if num <= 0 {
 			num = 1
@@ -1779,7 +1837,7 @@ func main() {
 			if gift == "" {
 				gift = "舰长"
 			}
-			ev = guardShipEvent(&cfg.Rules, 0, user, gift)
+			ev = guardShipEvent(&cfg.Rules, 0, user, proxyAvatarURL(q.Get("avatar")), gift)
 		case "gift":
 			// 模拟一个普通礼物：price=单价金瓜子(1000=1元，0=免费)
 			if gift == "" {
